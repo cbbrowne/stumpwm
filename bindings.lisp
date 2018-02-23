@@ -78,8 +78,8 @@ from most specific groups to most general groups.")
 (fill-keymap *root-map*
   (kbd "c")   "exec xterm"
   (kbd "C-c") "exec xterm"
-  (kbd "e")   "emacs"
-  (kbd "C-e") "emacs"
+  (kbd "e")   "remacs"
+  (kbd "C-e") "remacs"
   (kbd "b")   "banish"
   (kbd "C-b") "banish"
   (kbd "a")   "time"

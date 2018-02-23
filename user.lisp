@@ -311,7 +311,7 @@ current frame instead of switching to the window."
 
 (defcommand emacs () ()
   "Start emacs unless it is already running, in which case focus it."
-  (run-or-raise "emacs" '(:class "Emacs")))
+  (run-or-raise "remacs" '(:class "Emacs")))
 
 (defcommand copy-unhandled-error () ()
   "When an unhandled error occurs, StumpWM restarts and attempts to
