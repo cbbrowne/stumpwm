@@ -12,6 +12,17 @@
 
 (defvar *float-window-border* 1)
 (defvar *float-window-title-height* 10)
+(defvar *float-window-modifier* :super
+  "The keyboard modifier to use for resize and move floating windows without
+  clicking on the top border. Valid values are :META :ALT :HYPER :SUPER, :ALTGR
+  and :NUMLOCK.")
+
+
+(defun float-window-modifier ()
+  "Convert the *FLOAT-WINDOW-MODIFIER* to its corresponding X11."
+  (when-let ((fn (find-symbol (concat "MODIFIERS-" (symbol-name *float-window-modifier*))
+                              (find-package "STUMPWM"))))
+    (funcall fn *modifiers*)))
 
 ;; some book keeping functions
 (defmethod (setf window-x) :before (val (window float-window))
@@ -159,7 +170,7 @@
 
 (defun float-window-align (window)
   (with-accessors ((parent window-parent)
-                   (xwin window-xwin)
+                   (screen window-screen)
                    (width window-width)
                    (height window-height))
       window
@@ -169,7 +180,23 @@
             (xlib:drawable-height parent) (+ height *float-window-title-height* *float-window-border*)
             (xlib:window-background parent) (xlib:alloc-color (xlib:screen-default-colormap (screen-number (window-screen window)))
                                                               "Orange")))
-    (xlib:clear-area (window-parent window))))
+    (xlib:clear-area (window-parent window))
+    (let ((parent-x (xlib:drawable-x parent))
+          (parent-y (xlib:drawable-y parent))
+          (parent-width (xlib:drawable-width parent))
+          (parent-height (xlib:drawable-height parent))
+          (border (xlib:drawable-border-width parent))
+          (screen-width (screen-width screen))
+          (screen-height (screen-height screen)))
+      ;; Resize window when borders outside screen
+      (let ((diff-width (- (+ parent-x parent-width) (- screen-width (* 2 border))))
+            (diff-height (- (+ parent-y parent-height) (- screen-height (* 2 border)))))
+        (when (or (> parent-x 0) (> parent-y 0))
+          (float-window-move-resize window :x parent-x :y parent-y))
+        (when (> diff-width 0)
+          (float-window-move-resize window :width (- width diff-width)))
+        (when (> diff-height 0)
+          (float-window-move-resize window :height (- height diff-height)))))))
 
 (defmethod group-resize-request ((group float-group) window width height)
   (float-window-move-resize window :width width :height height))
@@ -185,14 +212,12 @@
 (defmethod group-lost-focus ((group float-group))
   (%float-focus-next group))
 
-(defmethod group-indicate-focus ((group float-group))
-  )
+(defmethod group-indicate-focus ((group float-group)))
 
 (defmethod group-focus-window ((group float-group) window)
   (focus-window window))
 
-(defmethod group-root-exposure ((group float-group))
-  )
+(defmethod group-root-exposure ((group float-group)))
 
 (defmethod group-add-head ((group float-group) head)
   (declare (ignore head)))
@@ -203,32 +228,74 @@
 (defmethod group-resize-head ((group float-group) oh nh)
   (declare (ignore oh nh)))
 
-(defmethod group-sync-all-heads ((group float-group))
-  )
+(defmethod group-sync-all-heads ((group float-group)))
 
 (defmethod group-sync-head ((group float-group) head)
-  (declare (ignore head))
-  )
+  (declare (ignore head)))
 
-(defmethod group-button-press (group x y (window float-window))
+(defvar *last-click-time* 0
+  "Time since the last click occurred")
+
+(defun window-display-height (window)
+  "Returns maximum displayable height of window accounting for the mode-line"
+  (let* ((head (window-head window))
+         (ml (head-mode-line head))
+         (ml-height (if (null ml) 0 (mode-line-height ml))))
+    (- (head-height head) ml-height
+       (* 2 *normal-border-width*)
+       *float-window-border*
+       *float-window-title-height*)))
+  
+(defun maximize-float (window &key horizontal vertical)
+  (let* ((head (window-head window))
+         (ml (head-mode-line head))
+         (hx (head-x head))
+         (hy (if (null ml) 0 (mode-line-height ml)))
+         (w (- (head-width head)
+               (* 2 *normal-border-width*)
+               (* 2 *float-window-border*)))
+         (h (window-display-height window)))
+    (when horizontal
+      (float-window-move-resize window :width w)) 
+    (when vertical
+      (float-window-move-resize window :y hy :height h))
+    (when (and horizontal vertical)
+      (float-window-move-resize window :x hx :y hy))))
+
+(defmethod group-button-press (group button x y (window float-window))
+  (declare (ignore button))
   (let ((screen (group-screen group))
         (initial-width (xlib:drawable-width (window-parent window)))
-        (initial-height (xlib:drawable-height (window-parent window))))
+        (initial-height (xlib:drawable-height (window-parent window)))
+        (xwin (window-xwin window)))
     (when (member *mouse-focus-policy* '(:click :sloppy))
       (group-focus-window group window))
-
+    
     ;; When in border
     (multiple-value-bind (relx rely same-screen-p child state-mask)
         (xlib:query-pointer (window-parent window))
-      (declare (ignore relx rely same-screen-p child))
-      (when (or (< x (xlib:drawable-x (window-xwin window)))
-                (> x (+ (xlib:drawable-width (window-xwin window))
-                        (xlib:drawable-x (window-xwin window))))
-                (< y (xlib:drawable-y (window-xwin window)))
-                (> y (+ (xlib:drawable-height (window-xwin window))
-                        (xlib:drawable-y (window-xwin window))))
-                (intersection (modifiers-super *modifiers*) (xlib:make-state-keys state-mask)))
-
+      (declare (ignore same-screen-p child))
+      (when (or (< x (xlib:drawable-x xwin))
+                (> x (+ (xlib:drawable-width xwin)
+                        (xlib:drawable-x xwin)))
+                (< y (xlib:drawable-y xwin))
+                (> y (+ (xlib:drawable-height xwin)
+                        (xlib:drawable-y xwin)))
+                (intersection (float-window-modifier)
+                              (xlib:make-state-keys state-mask)))
+        (when (find :button-1 (xlib:make-state-keys state-mask))
+          (let* ((current-time (/ (get-internal-real-time)
+                                  internal-time-units-per-second))
+                 (delta-t (- current-time *last-click-time*))
+                 (win-focused-p (eq window (screen-focus screen))))
+            (setf *last-click-time* current-time)
+            (when (< delta-t 0.25)
+              (cond ((and (not (eq (window-height window) 
+                                   (window-display-height window))) 
+                          win-focused-p) 
+                     (maximize-float window :vertical t))
+                    (win-focused-p (maximize-float window :vertical t :horizontal t))
+                    (t (focus-window window t))))))  
         ;; When resizing warp pointer to left-right corner
         (when (find :button-3 (xlib:make-state-keys state-mask))
           (xlib:warp-pointer (window-parent window) initial-width initial-height))
@@ -236,6 +303,7 @@
         (multiple-value-bind (relx rely same-screen-p child state-mask)
             (xlib:query-pointer (window-parent window))
           (declare (ignore same-screen-p child))
+
           (labels ((move-window-event-handler
                        (&rest event-slots &key event-key &allow-other-keys)
                      (case event-key
@@ -247,6 +315,11 @@
                             ;; Either move or resize the window
                             (cond
                               ((find :button-1 (xlib:make-state-keys state-mask))
+                               ;; if button-1 on the sides (left,
+                               ;; right, bottom) then we resize that
+                               ;; direction
+                               
+                               ;; if button-1 on the top, then we move the window
                                (setf (xlib:drawable-x parent) (- (getf event-slots :x) relx)
                                      (xlib:drawable-y parent) (- (getf event-slots :y) rely)))
                               ((find :button-3 (xlib:make-state-keys state-mask))
@@ -278,10 +351,14 @@
             (update-configuration window)
             ;; don't forget to update the cache
             (setf (window-x window) (xlib:drawable-x (window-parent window))
-                  (window-y window) (xlib:drawable-y (window-parent window)))))))))
+                  (window-y window) (xlib:drawable-y (window-parent window))))))
+      ;; restore the mouse to its original position
+      (xlib:warp-pointer (window-parent window) relx rely)
 
-(defmethod group-button-press ((group float-group) x y where)
-  (declare (ignore x y where))
+      )))
+
+(defmethod group-button-press ((group float-group) button x y where)
+  (declare (ignore button x y where))
   (when (next-method-p)
     (call-next-method)))
 
@@ -289,7 +366,10 @@
 
 (pushnew '(float-group *float-group-top-map*) *group-top-maps*)
 (defvar *float-group-top-map* (make-sparse-keymap))
-(defvar *float-group-root-map* (make-sparse-keymap))
+(defvar *float-group-root-map* (make-sparse-keymap)
+  "Commands specific to a floating group context hang from this keymap.
+It is available as part of the @dnf{prefix map} when the active group
+is a tile group.")
 
 
 (defcommand gnew-float (name) ((:rest "Group Name: "))

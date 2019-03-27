@@ -103,12 +103,10 @@
         ((equalp old-heads new-heads)
          (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
         (t
-         (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
+         (dformat 1 "Updating Xrandr or Xinerama configuration for ~S.~%" screen)
          (if new-heads
              (progn (head-force-refresh screen new-heads)
-                    (update-mode-lines screen)
-                    (loop for new-head in new-heads
-                       do (run-hook-with-args *new-head-hook* new-head screen)))
+                    (update-mode-lines screen))
              (dformat 1 "Invalid configuration! ~S~%" new-heads)))))))
 
 (define-stump-event-handler :map-request (parent send-event-p window)
@@ -231,29 +229,43 @@ The Caller is responsible for setting up the input focus."
       when (typep group (first i))
       collect (second i))))
 
+(defvar *current-key-seq* nil
+  "The sequence of keys which were used to invoke a command, available
+  within a command definition as a dynamic var binding. Commands may
+  dispatch further based on the value in *current-key-seq*. See the
+  REMAP-KEYS contrib module for a working use case.")
+
+(defvar *custom-key-event-handler* nil
+  "A custom key event handler can be set in this variable,
+  which will take precedence over the keymap based handler defined in
+  the default :KEY-PRESS event handler.")
+
 (define-stump-event-handler :key-press (code state #|window|#)
   (labels ((get-cmd (code state)
              (with-focus (screen-key-window (current-screen))
                (handle-keymap (top-maps) code state nil t nil))))
     (unwind-protect
-         ;; modifiers can sneak in with a race condition. so avoid that.
-         (unless (is-modifier code)
-           (multiple-value-bind (cmd key-seq) (get-cmd code state)
-             (cond
-               ((eq cmd t))
-               (cmd
-                (unmap-message-window (current-screen))
-                (eval-command cmd t) t)
-               (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq))))))))))
+         (or (and *custom-key-event-handler*
+                  (funcall *custom-key-event-handler* code state))
+             ;; modifiers can sneak in with a race condition. so avoid that.
+             (unless (is-modifier code)
+               (multiple-value-bind (cmd key-seq) (get-cmd code state)
+                 (cond
+                   ((eq cmd t))
+                   (cmd
+                    (unmap-message-window (current-screen))
+                    (let ((*current-key-seq* key-seq))
+                      (eval-command cmd t))
+                    t)
+                   (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq)))))))))))
 
 (defun bytes-to-window (bytes)
-  "A sick hack to assemble 4 bytes into a 32 bit number. This is
-because ratpoison sends the rp_command_request window in 8 byte
-chunks."
-  (+ (first bytes)
-     (ash (second bytes) 8)
-     (ash (third bytes) 16)
-     (ash (fourth bytes) 24)))
+  "Combine a list of 4 8-bit bytes into a 32-bit number. This is because
+ratpoison sends the rp_command_request window in 8 byte chunks."
+  (logior (first bytes)
+          (ash (second bytes) 8)
+          (ash (third bytes) 16)
+          (ash (fourth bytes) 24)))
 
 (defun handle-rp-commands (root)
   "Handle a ratpoison style command request."
@@ -472,9 +484,11 @@ converted to an atom is removed."
         (if (eq (window-group window) (current-group))
             (echo-string (window-screen window) (format nil "'~a' denied map request" (window-name window)))
             (echo-string (window-screen window) (format nil "'~a' denied map request in group ~a" (window-name window) (group-name (window-group window))))))
-      (frame-raise-window (window-group window) (window-frame window) window
-                          (eq (window-frame window)
-                              (tile-group-current-frame (window-group window))))))
+      (if (typep window 'tile-window)
+          (frame-raise-window (window-group window) (window-frame window) window
+                              (eq (window-frame window)
+                                  (tile-group-current-frame (window-group window))))
+          (raise-window window))))
 
 (defun maybe-raise-window (window)
   (if (deny-request-p window *deny-raise-request*)
@@ -575,26 +589,46 @@ the window in it's frame."
         (focus-all win)
         (update-all-mode-lines)))))
 
+(defun decode-button-code (code)
+  "Translate the mouse button number into a more readable format"
+  (ecase code
+    (1 :left-button)
+    (2 :middle-button)
+    (3 :right-button)
+    (4 :wheel-up)
+    (5 :wheel-down)
+    (6 :wheel-left)
+    (7 :wheel-right)
+    (8 :browser-back)
+    (9 :browser-front)))
+
+(defun scroll-button-keyword-p (button)
+  "Checks if button keyword is generated from the scroll wheel."
+  (or (eq button :wheel-down) (eq button :wheel-up)
+      (eq button :wheel-left) (eq button :wheel-right)))
+
 (define-stump-event-handler :button-press (window code x y child time)
-  (let ((screen (find-screen window))
+  (let ((button (decode-button-code code))
+        (screen (find-screen window))
         (mode-line (find-mode-line-by-window window))
         (win (find-window-by-parent window (top-windows))))
     (cond
       ((and screen (not child))
-       (group-button-press (screen-current-group screen) x y :root)
+       (group-button-press (screen-current-group screen) button x y :root)
        (run-hook-with-args *root-click-hook* screen code x y))
       (mode-line
        (run-hook-with-args *mode-line-click-hook* mode-line code x y))
       (win
-       (group-button-press (window-group win) x y win))))
+       (group-button-press (window-group win) button x y win))))
   ;; Pass click to client
   (xlib:allow-events *display* :replay-pointer time))
 
 (defun make-xlib-window (drawable)
   "For some reason the CLX xid cache screws up returns pixmaps when
 they should be windows. So use this function to make a window out of DRAWABLE."
-  (xlib::make-window :id (xlib:drawable-id drawable)
-                     :display *display*))
+  (make-instance 'xlib:window
+                 :id (xlib:drawable-id drawable)
+                 :display *display*))
 
 (defun handle-event (&rest event-slots &key display event-key &allow-other-keys)
   (declare (ignore display))
