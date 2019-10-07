@@ -45,12 +45,12 @@
 
 ;;; Configure request
 
-(flet ((has-x (mask) (= 1 (logand mask 1)))
-       (has-y (mask) (= 2 (logand mask 2)))
-       (has-w (mask) (= 4 (logand mask 4)))
-       (has-h (mask) (= 8 (logand mask 8)))
-       (has-bw (mask) (= 16 (logand mask 16)))
-       (has-stackmode (mask) (= 64 (logand mask 64))))
+(flet ((has-x (mask) (logbitp 0 mask))
+       (has-y (mask) (logbitp 1 mask))
+       (has-w (mask) (logbitp 2 mask))
+       (has-h (mask) (logbitp 3 mask))
+       (has-bw (mask) (logbitp 4 mask))
+       (has-stackmode (mask) (logbitp 6 mask)))
   (defun configure-managed-window (win x y width height stack-mode value-mask)
     ;; Grant the configure request but then maximize the window after the
     ;; granting.
@@ -288,8 +288,8 @@ ratpoison sends the rp_command_request window in 8 byte chunks."
   "Handle a StumpWM style command request."
   (let* ((win root)
          (screen (find-screen root))
-         (data (xlib:get-property win :stumpwm_command :delete-p t))
-         (cmd (bytes-to-string data)))
+         (data (xlib:get-property win :stumpwm_command :delete-p t :result-type '(vector (unsigned-byte 8))))
+         (cmd (utf8-to-string data)))
     (let ((msgs (screen-last-msg screen))
           (hlts (screen-last-msg-highlights screen))
           (*executing-stumpwm-command* t))
@@ -612,6 +612,7 @@ the window in it's frame."
         (screen (find-screen window))
         (mode-line (find-mode-line-by-window window))
         (win (find-window-by-parent window (top-windows))))
+    (run-hook-with-args *click-hook* screen code x y)
     (cond
       ((and screen (not child))
        (group-button-press (screen-current-group screen) button x y :root)
